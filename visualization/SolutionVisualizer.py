@@ -10,22 +10,15 @@ import json
 
 from RouteVisualizer import make_routing_figure
 from PackingVisualizer import make_packing_figure
-from StatisticAnalyzer import analyze_solver_statistics
 from ColorConversion import hex_color_to_shaded_list
 
 
 def main():
     st.set_page_config(layout="wide")
 
-    st.title("Solution visualization and solver statistics for the 3L-CVRP")
+    st.title("Solution visualization of CLP classifier")
 
-    solution_checkbox_ticked = st.sidebar.checkbox("Show solution visualization")
-    if solution_checkbox_ticked:
-        show_solution()
-
-    analysis_checkbox_ticked = st.sidebar.checkbox("Show solver statistics")
-    if analysis_checkbox_ticked:
-        show_analysis()
+    show_solution()
 
 
 def show_solution():
@@ -91,39 +84,6 @@ def show_solution():
                 st.plotly_chart(fig, use_container_width=True)
 
 
-def show_analysis():
-    uploaded_stat_file = st.sidebar.file_uploader("Please select a .json solver statistics file", type="json")
-    if uploaded_stat_file is not None:
-        try:
-            solver_statistics_data = get_solver_data_from_json(uploaded_stat_file.getvalue())
-        except KeyError as e:
-            st.write(
-                f"KeyError: {e} occurred while accessing JSON data. Please check again if you have uploaded a valid solution statistics file."
-            )
-            return
-        except Exception as e:
-            st.write(
-                f"An error occurred: {e}. Please check again if you have uploaded a valid solution statistics file."
-            )
-            return
-
-        solver_summary = solver_statistics_data["Summary"]
-
-        st.sidebar.write(f'Run time infeasible arc procedure: {solver_summary["Infeasible arc procedure"]:.2f}s')
-        st.sidebar.write(f'Run time lower bound procedure: {solver_summary["Lower bound vehicle procedure"]:.2f}s')
-        st.sidebar.write(f'Run time start solution procedure: {solver_summary["Start solution procedure"]:.2f}s')
-        st.sidebar.write(f'Run time B&C: {solver_summary["B&C"]:.2f}s')
-        st.sidebar.write(f'Total run time: {solver_summary["Total run time"]:.2f}s')
-        st.sidebar.write(f'Optimality gap: {solver_summary["Gap"]:.2f}%')
-        st.sidebar.write(f'B&B nodes: {solver_summary["B&B-Nodes"]}')
-        st.sidebar.write(f'Simplex iterations: {solver_summary["Simplex iterations"]}')
-        st.sidebar.write(
-            f'Integer solutions #calls / time: {solver_summary["Integer solutions callback"][0]} / {solver_summary["Integer solutions callback"][1]:.2f}s'
-        )
-
-        st.header("Analyze solver statistics")
-        analyze_solver_statistics(solver_statistics_data)
-
 
 def create_filter_mask(tours):
     selected_tour_id = st.sidebar.multiselect("Select tour id", tours["tourId"])
@@ -138,44 +98,6 @@ def create_filter_mask(tours):
         filter_mask = filter_mask & tours.tourId.isin(selected_tour_id)
 
     return filter_mask
-
-
-@st.cache_data
-def get_solver_data_from_json(file):
-    solver_statistics = json.loads(file)
-    solver_statistics_data = get_solver_statistics_data(solver_statistics)
-
-    solver_summary = {
-        "Infeasible arc procedure": solver_statistics["Timer"]["InfeasibleArcs"],
-        "Lower bound vehicle procedure": solver_statistics["Timer"]["LowerBoundVehicles"],
-        "Start solution procedure": solver_statistics["Timer"]["StartSolution"],
-        "B&C": solver_statistics["Timer"]["Branch&Cut"],
-        "Gap": solver_statistics["Gap"] * 100,
-        "B&B-Nodes": solver_statistics["NodeCount"],
-        "Simplex iterations": solver_statistics["SimplexIterations"],
-        "Integer solutions callback": [
-            solver_statistics_data["ElementData"].at["IntegerSolutions", "Count"],
-            solver_statistics_data["ElementData"].at["IntegerSolutions", "Time"] / 1e6,
-        ],
-    }
-
-    solver_summary["Preprocessing"] = (
-        solver_summary["Infeasible arc procedure"]
-        + solver_summary["Lower bound vehicle procedure"]
-        + solver_summary["Start solution procedure"]
-    )
-
-    solver_summary["Total run time"] = solver_summary["Preprocessing"] + solver_summary["B&C"]
-
-    if "AddFracSolCuts" in solver_statistics_data["ElementData"].index:
-        solver_summary["Fractional solutions [calls, time]"] = [
-            solver_statistics_data["ElementData"].at["AddFracSolCuts", "Count"],
-            solver_statistics_data["ElementData"].at["AddFracSolCuts", "Time"] / 1e6,
-        ]
-
-    solver_statistics_data["Summary"] = solver_summary
-
-    return solver_statistics_data
 
 
 @st.cache_data
@@ -292,65 +214,6 @@ def get_tours_as_data_frame(solution):
     new_tours = pd.DataFrame(tours)
 
     return new_tours
-
-
-def get_solver_statistics_data(solver_statistics):
-    solver_statistics_data = {}
-    callback_tracker = solver_statistics["SubtourTracker"]
-    lower_bound_progress = callback_tracker["LowerBoundProgress"]
-    solver_statistics_data["LBProgress"] = pd.DataFrame(lower_bound_progress, columns=["Time", "NodeLb"])
-    solver_statistics_data["LBProgress"][["Node", "LB"]] = pd.DataFrame(
-        solver_statistics_data["LBProgress"].NodeLb.tolist(),
-        index=solver_statistics_data["LBProgress"].index,
-    )
-    solver_statistics_data["LBProgress"].drop("NodeLb", axis=1, inplace=True)
-
-    upper_bound_progress = callback_tracker["UpperBoundProgress"]
-    solver_statistics_data["UBProgress"] = pd.DataFrame(upper_bound_progress, columns=["Time", "HeuObj"])
-    solver_statistics_data["UBProgress"][["ObjVal", "SPHeur"]] = pd.DataFrame(
-        solver_statistics_data["UBProgress"].HeuObj.tolist(),
-        index=solver_statistics_data["UBProgress"].index,
-    )
-    solver_statistics_data["UBProgress"].drop("HeuObj", axis=1, inplace=True)
-
-    last_time = solver_statistics_data["LBProgress"].iloc[-1]["Time"]
-    best_objective_value = solver_statistics_data["UBProgress"].iloc[-1]["ObjVal"]
-    solver_statistics_data["UBProgress"] = pd.concat(
-        [
-            solver_statistics_data["UBProgress"],
-            pd.DataFrame({"Time": last_time, "ObjVal": best_objective_value, "SPHeur": False}, index=[0]),
-        ],
-        axis=0,
-        join="outer",
-        ignore_index=True,
-    )
-
-    call_counter = callback_tracker["ElementCallCounter"]
-    types, counts = map(list, zip(*call_counter))
-    call_total_time = callback_tracker["ElementCallTime"]
-    types, times = map(list, zip(*call_total_time))
-    solver_statistics_data["ElementData"] = pd.DataFrame(
-        list(zip(counts, times)), index=types, columns=["Count", "Time"]
-    )
-
-    lazy_constraint_counter = callback_tracker["LazyConstraintCounter"]
-    constraint_types, constraint_counters = map(list, zip(*lazy_constraint_counter))
-    solver_statistics_data["LazyConstraintsCount"] = pd.DataFrame(
-        constraint_counters, index=constraint_types, columns=["Count"]
-    )
-
-    cut_counter = callback_tracker["CutCounter"]
-    if cut_counter:
-        cut_types, cut_counts = map(list, zip(*cut_counter))
-    cut_timer = callback_tracker["CutTimer"]
-    if cut_timer:
-        cut_types, cut_times = map(list, zip(*cut_timer))
-    if cut_counter and cut_timer:
-        solver_statistics_data["CutData"] = pd.DataFrame(
-            list(zip(cut_counts, cut_times)), index=cut_types, columns=["Count", "Time"]
-        )
-
-    return solver_statistics_data
 
 
 if __name__ == "__main__":
